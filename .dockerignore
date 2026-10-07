@@ -1,0 +1,25 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+*.mp4
+*.mov
+*.m4v
+*.avi
+WhatsApp Sticker*
+outputs/*.mp4
+uploads/*
+!uploads/.gitkeep
+!outputs/.gitkeep
+cloudflared.exe
+.git
+.github
+.gitignore
+.dockerignore
+*.log
+scratch/
