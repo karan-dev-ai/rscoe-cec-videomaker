@@ -7,34 +7,19 @@ echo ======================================================================
 echo   Push CEC Video Maker to GitHub (for 24/7 Free Cloud Hosting)
 echo ======================================================================
 echo.
-echo Step 1: Create a new repository on https://github.com/new
-echo   - Name: rscoe-cec-videomaker
-echo   - Choose: Public or Private
-echo   - DO NOT check "Add a README" or ".gitignore" (already created)
-echo   - Click "Create repository"
+echo Target Repository: https://github.com/karan-dev-ai/rscoe-cec-videomaker.git
 echo.
-echo Step 2: Copy your GitHub repository URL
-echo   (Example: https://github.com/YourUsername/rscoe-cec-videomaker.git)
-echo.
-set /p REPO_URL="Enter your GitHub Repository URL: "
-
-if "%REPO_URL%"=="" (
-    echo [ERROR] No URL provided. Exiting.
-    pause
-    exit /b 1
-)
-
-echo.
-echo [1/3] Adding files to Git...
+echo [1/3] Staging all code, templates, and 15 motivational study tracks...
 git add .
-git commit -m "Update for 24/7 cloud hosting on Render" >nul 2>&1
+git commit -m "Deploy RSCOE CEC Video Maker" >nul 2>&1
 
-echo [2/3] Setting remote...
+echo [2/3] Setting GitHub remote...
 git remote remove origin >nul 2>&1
-git remote add origin %REPO_URL%
+git remote add origin https://github.com/karan-dev-ai/rscoe-cec-videomaker.git
 
 echo [3/3] Pushing to GitHub...
-echo (If prompted by GitHub, sign in to authorize)
+echo.
+echo * If a GitHub sign-in popup appears, click "Sign in with your browser" / "Authorize" *
 echo.
 git push -u origin main --force
 
@@ -42,12 +27,12 @@ echo.
 echo ======================================================================
 echo  Code pushed to GitHub successfully!
 echo.
-echo  Now open https://render.com (100%% Free, No Credit Card):
-echo   1. Sign in with GitHub
-echo   2. Click "New +" -> "Web Service"
-echo   3. Select your "rscoe-cec-videomaker" repository
-echo   4. Click "Deploy Web Service"
+echo  Now switch back to your Render tab:
+echo   1. In the top right corner, click "Manual Deploy"
+echo   2. Click "Deploy latest commit"
 echo.
-echo  You will get your permanent 24/7 link (e.g. https://...onrender.com)!
+echo  Render will start building your container!
+echo  Within 2-3 minutes, your permanent link will be LIVE:
+echo  https://rscoe-cec-videomaker.onrender.com
 echo ======================================================================
 pause
