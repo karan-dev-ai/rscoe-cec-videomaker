@@ -25,6 +25,8 @@ COPY --chown=user:user . .
 # Ensure working directories exist with proper write permissions
 RUN mkdir -p uploads outputs assets/music assets/logo
 
-EXPOSE 7860
+EXPOSE 8000
+EXPOSE 10000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+
