@@ -6,6 +6,8 @@ import logging
 from typing import List, Optional, Tuple
 import imageio_ffmpeg
 
+logger = logging.getLogger("video_processor")
+
 try:
     ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
