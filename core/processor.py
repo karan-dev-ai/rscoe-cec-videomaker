@@ -312,7 +312,10 @@ def process_video_reel(
             if title_text and title_text.strip():
                 clean_title = title_text.strip().replace(":", "\\:").replace("'", "").replace('"', "")
                 font_file = pick_font_file()
-                font_arg = f":fontfile='{os.path.abspath(font_file).replace('\\', '/').replace(':', '\\:')}'" if font_file else ""
+                font_arg = ""
+                if font_file:
+                    safe_font = os.path.abspath(font_file).replace("\\", "/").replace(":", "\\:")
+                    font_arg = f":fontfile='{safe_font}'"
                 filter_parts_fb.append(
                     f"{curr_v}drawtext=text='{clean_title}'{font_arg}:fontcolor=0xFFD700:fontsize=52:"
                     f"box=1:boxcolor=0x0B192C@0.85:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
