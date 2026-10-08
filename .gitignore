@@ -32,7 +32,7 @@ ENV/
 *.m4v
 *.avi
 WhatsApp Sticker*
-outputs/*.mp4
+outputs/*
 uploads/*
 !uploads/.gitkeep
 !outputs/.gitkeep

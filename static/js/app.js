@@ -218,10 +218,15 @@ generateBtn.addEventListener('click', async () => {
     }
     const { job_id } = await sessionRes.json();
 
-    // 2. Upload clips one-by-one with live progress (0% -> 50%)
+    // 2. Upload clips in parallel batches (concurrency=2) for fast mobile transmission (0% -> 50%)
     const total = selectedFiles.length;
-    for (let i = 0; i < total; i++) {
-      await uploadClipAsync(job_id, selectedFiles[i], i, total);
+    const concurrency = 2;
+    for (let i = 0; i < total; i += concurrency) {
+      const batch = [];
+      for (let j = i; j < Math.min(i + concurrency, total); j++) {
+        batch.push(uploadClipAsync(job_id, selectedFiles[j], j, total));
+      }
+      await Promise.all(batch);
     }
 
     updateProgress(50, 'All clips uploaded! Starting FFmpeg video engine...');

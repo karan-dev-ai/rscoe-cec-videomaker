@@ -5,6 +5,7 @@ import shutil
 import logging
 import json
 from typing import List, Optional
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -50,6 +51,7 @@ executor = ThreadPoolExecutor(max_workers=2)
 # job_id -> { "status": "...", "progress": int, "step": str, "clips": [], "output_url": str, "error": str, "created_at": float }
 JOBS = {}
 LAST_PLAYED_MUSIC = None
+jobs_lock = threading.Lock()
 
 def save_job_state(job_id: str):
     job = JOBS.get(job_id)
@@ -170,12 +172,13 @@ async def upload_clip(
             while chunk := await clip.read(1024 * 1024): # 1MB chunked read
                 f.write(chunk)
 
-        # Record clip path
-        clips_list = JOBS[job_id]["clips"]
-        while len(clips_list) <= clip_index:
-            clips_list.append(None)
-        clips_list[clip_index] = save_path
-        save_job_state(job_id)
+        # Record clip path safely
+        with jobs_lock:
+            clips_list = JOBS[job_id]["clips"]
+            while len(clips_list) <= clip_index:
+                clips_list.append(None)
+            clips_list[clip_index] = save_path
+            save_job_state(job_id)
 
         logger.info(f"Job {job_id}: Saved clip #{clip_index} ({clip.filename}) -> {os.path.getsize(save_path)} bytes")
         return {
