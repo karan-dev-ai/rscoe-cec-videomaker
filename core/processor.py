@@ -6,6 +6,9 @@ import logging
 import shutil
 from typing import List, Optional, Tuple
 import imageio_ffmpeg
+from PIL import Image, ImageDraw, ImageFont
+
+logger = logging.getLogger("video_processor")
 
 # Prefer system FFmpeg (e.g. /usr/bin/ffmpeg in Docker) which is compiled with libfreetype & full filters
 system_ffmpeg = shutil.which("ffmpeg")
@@ -17,16 +20,7 @@ else:
     except Exception:
         ffmpeg_bin = "ffmpeg"
 
-def is_filter_supported(name: str) -> bool:
-    try:
-        res = subprocess.run([ffmpeg_bin, "-h", f"filter={name}"], capture_output=True, text=True, timeout=5)
-        return res.returncode == 0
-    except Exception:
-        return False
-
-HAS_DRAWTEXT = is_filter_supported("drawtext")
-HAS_XFADE = is_filter_supported("xfade")
-logger.info(f"Using FFmpeg: {ffmpeg_bin} (drawtext: {HAS_DRAWTEXT}, xfade: {HAS_XFADE})")
+logger.info(f"Using FFmpeg: {ffmpeg_bin}")
 
 def get_media_duration(file_path: str) -> float:
     """Get the duration of a video or audio file using ffmpeg."""
@@ -78,13 +72,13 @@ TRANSITIONS = [
 
 # Colorful, bold title styles for the first 5 seconds
 TITLE_PALETTES = [
-    {"color": "0xFFD700", "box": "0x0B192C@0.85", "name": "Electric Gold"},
-    {"color": "0x00F0FF", "box": "0x0A192F@0.85", "name": "Cyber Cyan"},
-    {"color": "0x39FF14", "box": "0x052E16@0.88", "name": "Neon Emerald"},
-    {"color": "0xFF6B00", "box": "0x1A0B00@0.85", "name": "Blaze Orange"},
-    {"color": "0xFFFFFF", "box": "0x2E1065@0.88", "name": "Royal Platinum"},
-    {"color": "0xFFEE00", "box": "0x18181B@0.88", "name": "Solar Yellow"},
-    {"color": "0xE056FD", "box": "0x130F40@0.88", "name": "Neon Violet"},
+    {"name": "Electric Gold", "text": (255, 215, 0, 255), "bg": (11, 25, 44, 230), "border": (255, 215, 0, 255)},
+    {"name": "Cyber Cyan", "text": (0, 240, 255, 255), "bg": (10, 25, 47, 230), "border": (0, 240, 255, 255)},
+    {"name": "Neon Emerald", "text": (57, 255, 20, 255), "bg": (5, 46, 22, 230), "border": (57, 255, 20, 255)},
+    {"name": "Blaze Orange", "text": (255, 107, 0, 255), "bg": (26, 11, 0, 230), "border": (255, 107, 0, 255)},
+    {"name": "Royal Platinum", "text": (255, 255, 255, 255), "bg": (46, 16, 101, 230), "border": (255, 215, 0, 255)},
+    {"name": "Solar Yellow", "text": (255, 238, 0, 255), "bg": (24, 24, 27, 230), "border": (255, 238, 0, 255)},
+    {"name": "Neon Violet", "text": (224, 86, 253, 255), "bg": (19, 15, 64, 230), "border": (224, 86, 253, 255)},
 ]
 
 def pick_font_file() -> Optional[str]:
@@ -113,6 +107,73 @@ def pick_font_file() -> Optional[str]:
         if os.path.exists(sys_f):
             return sys_f
     return None
+
+def generate_title_card_image(
+    title_text: str,
+    output_png_path: str,
+    width: int = 720,
+    height: int = 1280
+) -> bool:
+    """Generate a crisp, centered, transparent PNG badge overlay for the starting title using Pillow."""
+    try:
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        palette = random.choice(TITLE_PALETTES)
+        text_color = palette["text"]
+        bg_color = palette["bg"]
+        border_color = palette["border"]
+
+        font_file = pick_font_file()
+        font_size = 48
+        font = None
+        if font_file and os.path.exists(font_file):
+            try:
+                font = ImageFont.truetype(font_file, font_size)
+            except Exception:
+                pass
+        if font is None:
+            font = ImageFont.load_default()
+
+        # Clean title text
+        display_text = title_text.strip()
+        if len(display_text) > 36:
+            display_text = display_text[:33] + "..."
+
+        bbox = draw.textbbox((0, 0), display_text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        cx = width // 2
+        cy = height // 2
+        pad_x = 36
+        pad_y = 22
+
+        box_left = max(24, cx - text_w // 2 - pad_x)
+        box_top = cy - text_h // 2 - pad_y
+        box_right = min(width - 24, cx + text_w // 2 + pad_x)
+        box_bottom = cy + text_h // 2 + pad_y
+
+        # Draw smooth rounded badge
+        draw.rounded_rectangle(
+            [box_left, box_top, box_right, box_bottom],
+            radius=18,
+            fill=bg_color,
+            outline=border_color,
+            width=3
+        )
+
+        # Draw centered text
+        text_x = cx - text_w // 2
+        text_y = cy - text_h // 2
+        draw.text((text_x, text_y), display_text, font=font, fill=text_color)
+
+        img.save(output_png_path, "PNG")
+        logger.info(f"Generated title card PNG overlay: {output_png_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to generate title card PNG: {e}")
+        return False
 
 def process_video_reel(
     clip_paths: List[str],
@@ -254,28 +315,21 @@ def process_video_reel(
             )
             current_v = "[v_with_logo]"
 
-        # Overlay Title: Starting 5 seconds, BIGGER (size 52), BOLD, and COLOURFUL
-        if title_text and title_text.strip() and HAS_DRAWTEXT:
-            title_file_path = os.path.join(temp_dir, "title.txt")
-            with open(title_file_path, "w", encoding="utf-8") as tf:
-                tf.write(title_text.strip())
-            safe_title_file = title_file_path.replace("\\", "/").replace(":", "\\:")
-
-            palette = random.choice(TITLE_PALETTES)
-            font_file = pick_font_file()
-            font_arg = ""
-            if font_file:
-                safe_font = os.path.abspath(font_file).replace("\\", "/").replace(":", "\\:")
-                font_arg = f":fontfile='{safe_font}'"
+        # Overlay Title: Starting 5 seconds, BIGGER, BOLD, and COLOURFUL via Pillow PNG overlay
+        has_title_overlay = False
+        title_png = os.path.join(temp_dir, "title_card.png")
+        if title_text and title_text.strip() and generate_title_card_image(title_text.strip(), title_png, width=output_width, height=output_height):
+            inputs.extend(["-i", title_png])
+            title_input_idx = next_input_idx
+            next_input_idx += 1
 
             title_end = min(5.0, actual_total_video_dur - 0.5)
             if title_end > 1.0:
                 filter_parts.append(
-                    f"{current_v}drawtext=textfile='{safe_title_file}'{font_arg}:fontcolor={palette['color']}:fontsize=52:"
-                    f"box=1:boxcolor={palette['box']}:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
-                    f"enable='between(t,0.5,{title_end:.2f})'[v_titled]"
+                    f"{current_v}[{title_input_idx}:v]overlay=0:0:enable='between(t,0.5,{title_end:.2f})'[v_titled]"
                 )
                 current_v = "[v_titled]"
+                has_title_overlay = True
 
         # Mix Background Music with Fade-In & Fade-Out
         update_progress(93, "Mixing background study music...")
@@ -358,25 +412,14 @@ def process_video_reel(
 
             total_dur_fb = sum(segment_durations) if segment_durations else dur_per_clip * len(temp_segments)
 
-            if title_text and title_text.strip() and HAS_DRAWTEXT:
-                title_file_path = os.path.join(temp_dir, "title.txt")
-                if not os.path.exists(title_file_path):
-                    with open(title_file_path, "w", encoding="utf-8") as tf:
-                        tf.write(title_text.strip())
-                safe_title_file = title_file_path.replace("\\", "/").replace(":", "\\:")
-
-                font_file = pick_font_file()
-                font_arg = ""
-                if font_file:
-                    safe_font = os.path.abspath(font_file).replace("\\", "/").replace(":", "\\:")
-                    font_arg = f":fontfile='{safe_font}'"
+            if has_title_overlay and os.path.exists(title_png):
+                cmd_inputs.extend(["-i", title_png])
                 title_end_fb = min(5.0, total_dur_fb - 0.5)
                 filter_parts_fb.append(
-                    f"{curr_v}drawtext=textfile='{safe_title_file}'{font_arg}:fontcolor=0xFFD700:fontsize=52:"
-                    f"box=1:boxcolor=0x0B192C@0.85:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
-                    f"enable='between(t,0.5,{title_end_fb:.2f})'[v_titled]"
+                    f"{curr_v}[{fb_input_idx}:v]overlay=0:0:enable='between(t,0.5,{title_end_fb:.2f})'[v_titled]"
                 )
                 curr_v = "[v_titled]"
+                fb_input_idx += 1
 
             fb_has_audio = False
             if music_path and os.path.exists(music_path):
@@ -444,7 +487,7 @@ def process_video_reel(
             res = subprocess.run(cmd_safe, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            err_snip = res.stderr[-300:].strip() if res.stderr else f"Exit code {res.returncode}"
+            err_snip = res.stderr[-600:].strip() if res.stderr else f"Exit code {res.returncode}"
             logger.error(f"FFmpeg composition error: {err_snip}")
             return False, f"FFmpeg failed: {err_snip}"
 
