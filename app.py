@@ -3,6 +3,7 @@ import uuid
 import time
 import shutil
 import logging
+import json
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
@@ -49,6 +50,33 @@ executor = ThreadPoolExecutor(max_workers=2)
 # job_id -> { "status": "...", "progress": int, "step": str, "clips": [], "output_url": str, "error": str, "created_at": float }
 JOBS = {}
 LAST_PLAYED_MUSIC = None
+
+def save_job_state(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return
+    job_dir = os.path.join(UPLOADS_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    json_path = os.path.join(job_dir, "job.json")
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(job, f)
+    except Exception as e:
+        logger.warning(f"Error saving job state for {job_id}: {e}")
+
+def load_job_state(job_id: str):
+    if job_id in JOBS:
+        return JOBS[job_id]
+    json_path = os.path.join(UPLOADS_DIR, job_id, "job.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                JOBS[job_id] = data
+                return data
+        except Exception as e:
+            logger.warning(f"Error loading job state for {job_id}: {e}")
+    return None
 
 def cleanup_old_files():
     """Remove uploads and outputs older than 24 hours to preserve disk space."""
@@ -118,6 +146,7 @@ async def create_job_session():
         "clips": [],
         "created_at": time.time(),
     }
+    save_job_state(job_id)
     logger.info(f"Initialized job session {job_id}")
     return {"job_id": job_id}
 
@@ -128,7 +157,8 @@ async def upload_clip(
     clip_index: int = Form(...),
     clip: UploadFile = File(...)
 ):
-    if job_id not in JOBS:
+    job = load_job_state(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job session expired or not found.")
 
     job_upload_dir = os.path.join(UPLOADS_DIR, job_id)
@@ -142,10 +172,10 @@ async def upload_clip(
 
         # Record clip path
         clips_list = JOBS[job_id]["clips"]
-        # Ensure list is large enough
         while len(clips_list) <= clip_index:
             clips_list.append(None)
         clips_list[clip_index] = save_path
+        save_job_state(job_id)
 
         logger.info(f"Job {job_id}: Saved clip #{clip_index} ({clip.filename}) -> {os.path.getsize(save_path)} bytes")
         return {
@@ -162,8 +192,9 @@ def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, ti
     global LAST_PLAYED_MUSIC
     try:
         JOBS[job_id]["status"] = "processing"
-        JOBS[job_id]["step"] = "Preparing soothing music..."
-        JOBS[job_id]["progress"] = 55
+        JOBS[job_id]["step"] = "Preparing study soundtrack..."
+        JOBS[job_id]["progress"] = 52
+        save_job_state(job_id)
 
         # Determine music
         if music_choice and music_choice != "random":
@@ -183,8 +214,15 @@ def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, ti
         output_filename = f"cec_video_{int(time.time())}_{job_id[:6]}.mp4"
         output_filepath = os.path.join(OUTPUTS_DIR, output_filename)
 
-        JOBS[job_id]["step"] = f"Merging {len(clip_paths)} clips & overlaying CEC badge..."
-        JOBS[job_id]["progress"] = 70
+        def on_processor_progress(pct: int, msg: str):
+            if job_id in JOBS:
+                JOBS[job_id]["progress"] = pct
+                JOBS[job_id]["step"] = msg
+                save_job_state(job_id)
+
+        JOBS[job_id]["step"] = f"Optimizing {len(clip_paths)} clips for vertical reel..."
+        JOBS[job_id]["progress"] = 55
+        save_job_state(job_id)
 
         ok, msg = process_video_reel(
             clip_paths=clip_paths,
@@ -192,12 +230,14 @@ def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, ti
             logo_path=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
             music_path=chosen_music,
             target_duration=target_duration,
-            title_text=title_text
+            title_text=title_text,
+            progress_callback=on_processor_progress
         )
 
         if not ok:
             JOBS[job_id]["status"] = "failed"
             JOBS[job_id]["error"] = msg
+            save_job_state(job_id)
             logger.error(f"Job {job_id} failed: {msg}")
             return
 
@@ -206,12 +246,14 @@ def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, ti
         JOBS[job_id]["step"] = "Done!"
         JOBS[job_id]["output_file"] = output_filename
         JOBS[job_id]["output_url"] = f"/api/download/{output_filename}"
+        save_job_state(job_id)
         logger.info(f"Job {job_id} completed successfully: {output_filename}")
 
     except Exception as e:
         logger.exception(f"Unhandled error in job {job_id}")
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(e)
+        save_job_state(job_id)
 
 # Step 3: Trigger generation once clips are uploaded
 @app.post("/api/jobs/{job_id}/start")
@@ -221,10 +263,11 @@ async def start_job(
     title_text: Optional[str] = Form(""),
     music_choice: Optional[str] = Form("random")
 ):
-    if job_id not in JOBS:
+    job = load_job_state(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job session not found.")
 
-    raw_clips = JOBS[job_id].get("clips", [])
+    raw_clips = job.get("clips", [])
     valid_clips = [c for c in raw_clips if c and os.path.exists(c)]
 
     if len(valid_clips) < 2:
@@ -233,6 +276,7 @@ async def start_job(
     JOBS[job_id]["status"] = "processing"
     JOBS[job_id]["progress"] = 50
     JOBS[job_id]["step"] = f"All {len(valid_clips)} clips received! Starting video render..."
+    save_job_state(job_id)
 
     executor.submit(
         run_video_job,
@@ -247,10 +291,14 @@ async def start_job(
 
 @app.get("/api/job/{job_id}")
 async def get_job_status(job_id: str):
-    job = JOBS.get(job_id)
+    job = load_job_state(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
+
+@app.get("/api/debug/jobs")
+async def debug_jobs():
+    return {"jobs": JOBS}
 
 @app.get("/api/download/{filename}")
 async def download_video(filename: str):

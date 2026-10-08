@@ -110,6 +110,7 @@ def process_video_reel(
     output_width: int = 720,
     output_height: int = 1280,
     logo_scale_width: int = 190,
+    progress_callback: Optional[callable] = None,
 ) -> Tuple[bool, str]:
     """
     Merge clips into a seamless 30-40s vertical 9:16 video reel with smooth transitions.
@@ -123,11 +124,18 @@ def process_video_reel(
     if not clip_paths:
         return False, "No clips provided."
 
+    def update_progress(pct: int, msg: str):
+        if progress_callback:
+            try:
+                progress_callback(pct, msg)
+            except Exception:
+                pass
+
     num_clips = len(clip_paths)
     logger.info(f"Processing {num_clips} clips with target duration {target_duration}s")
 
     # Transition duration between clips
-    trans_dur = 0.70 if num_clips > 1 else 0.0
+    trans_dur = 0.65 if num_clips > 1 else 0.0
     if num_clips > 1:
         dur_per_clip = (target_duration + (num_clips - 1) * trans_dur) / num_clips
     else:
@@ -138,11 +146,15 @@ def process_video_reel(
     temp_dir = os.path.join(os.path.dirname(output_path), f"temp_render_{int(random.random()*100000)}")
     os.makedirs(temp_dir, exist_ok=True)
     temp_segments = []
+    segment_durations = []
 
     try:
         # Step 1: Preprocess each clip individually to 720x1280 MP4
         # Single-pass scale+crop auto-rotates phone orientation and ensures lightweight memory consumption
         for i, clip_p in enumerate(clip_paths):
+            pct_val = 55 + int((i / num_clips) * 30)
+            update_progress(pct_val, f"Formatting clip {i+1} of {num_clips} (vertical 9:16)...")
+
             abs_clip = os.path.abspath(clip_p)
             raw_dur = get_media_duration(abs_clip)
             actual_dur = min(dur_per_clip, raw_dur)
@@ -158,13 +170,15 @@ def process_video_reel(
 
             cmd = [
                 ffmpeg_bin, "-y",
+                "-threads", "2",
                 "-ss", f"{start_offset:.2f}",
                 "-t", f"{actual_dur:.2f}",
                 "-i", abs_clip,
                 "-vf", vf,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "20",
+                "-tune", "fastdecode",
+                "-crf", "23",
                 "-an",
                 seg_out
             ]
@@ -174,9 +188,15 @@ def process_video_reel(
                 err_snip = res.stderr[-300:].strip() if res.stderr else f"Exit code {res.returncode}"
                 logger.error(f"Failed preprocessing clip #{i+1}: {err_snip}")
                 return False, f"Failed processing clip #{i+1}: {err_snip}"
+            
+            measured_dur = get_media_duration(seg_out)
+            if measured_dur <= 0.2:
+                measured_dur = actual_dur
+            segment_durations.append(measured_dur)
             temp_segments.append(seg_out)
 
         # Step 2: Build the unified composition filtergraph
+        update_progress(88, "Applying smooth transitions & CEC badge...")
         inputs = []
         for s in temp_segments:
             inputs.extend(["-i", os.path.abspath(s)])
@@ -190,20 +210,22 @@ def process_video_reel(
 
         if len(temp_segments) == 1:
             current_v = "[0:v]"
-            actual_total_video_dur = dur_per_clip
+            actual_total_video_dur = segment_durations[0]
         else:
             curr_tag = "[0:v]"
-            accum_offset = dur_per_clip
+            curr_len = segment_durations[0]
             for idx in range(1, len(temp_segments)):
-                offset = max(0.5, accum_offset - trans_dur)
+                seg_dur = segment_durations[idx]
+                t_dur = min(0.65, curr_len * 0.35, seg_dur * 0.35)
+                offset = max(0.2, curr_len - t_dur)
                 next_tag = f"[xf_{idx}]"
                 filter_parts.append(
-                    f"{curr_tag}[{idx}:v]xfade=transition={chosen_trans}:duration={trans_dur:.2f}:offset={offset:.2f}{next_tag}"
+                    f"{curr_tag}[{idx}:v]xfade=transition={chosen_trans}:duration={t_dur:.2f}:offset={offset:.2f}{next_tag}"
                 )
                 curr_tag = next_tag
-                accum_offset = offset + dur_per_clip
+                curr_len = offset + seg_dur
             current_v = curr_tag
-            actual_total_video_dur = accum_offset
+            actual_total_video_dur = curr_len
 
         # Overlay Logo: PERMANENT (intact from second 0 to the very end of video)
         if logo_path and os.path.exists(logo_path):
@@ -228,15 +250,17 @@ def process_video_reel(
                 safe_font = os.path.abspath(font_file).replace("\\", "/").replace(":", "\\:")
                 font_arg = f":fontfile='{safe_font}'"
 
-            # 5-second duration: 0.5s to 5.0s, fontsize=52, rich colored box with padding
-            filter_parts.append(
-                f"{current_v}drawtext=text='{clean_title}'{font_arg}:fontcolor={palette['color']}:fontsize=52:"
-                f"box=1:boxcolor={palette['box']}:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"enable='between(t,0.5,5.0)'[v_titled]"
-            )
-            current_v = "[v_titled]"
+            title_end = min(5.0, actual_total_video_dur - 0.5)
+            if title_end > 1.0:
+                filter_parts.append(
+                    f"{current_v}drawtext=text='{clean_title}'{font_arg}:fontcolor={palette['color']}:fontsize=52:"
+                    f"box=1:boxcolor={palette['box']}:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
+                    f"enable='between(t,0.5,{title_end:.2f})'[v_titled]"
+                )
+                current_v = "[v_titled]"
 
         # Mix Background Music with Fade-In & Fade-Out
+        update_progress(93, "Mixing background study music...")
         has_audio = False
         if music_path and os.path.exists(music_path):
             abs_music = os.path.abspath(music_path)
@@ -254,7 +278,10 @@ def process_video_reel(
             has_audio = True
 
         # Build final command
-        final_cmd = [ffmpeg_bin, "-y"] + inputs
+        final_cmd = [
+            ffmpeg_bin, "-y",
+            "-threads", "2",
+        ] + inputs
         if filter_parts:
             final_cmd.extend(["-filter_complex", ";".join(filter_parts)])
             final_cmd.extend(["-map", current_v])
@@ -283,12 +310,14 @@ def process_video_reel(
             os.path.abspath(output_path)
         ])
 
+        update_progress(96, "Finalizing high-definition reel encoding...")
         logger.info(f"Executing final composition ({actual_total_video_dur:.1f}s)...")
         res = subprocess.run(final_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         # Fallback: If xfade somehow fails, fall back to standard concat filter
         if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            logger.warning(f"xfade failed, attempting concat filter fallback...")
+            update_progress(97, "Finalizing with high-compatibility engine...")
+            logger.warning("xfade failed, attempting concat filter fallback...")
 
             filter_parts_fb = []
             concat_tags = "".join([f"[{k}:v]" for k in range(len(temp_segments))])
@@ -309,6 +338,8 @@ def process_video_reel(
                 curr_v = "[v_logo]"
                 fb_input_idx += 1
 
+            total_dur_fb = sum(segment_durations) if segment_durations else dur_per_clip * len(temp_segments)
+
             if title_text and title_text.strip():
                 clean_title = title_text.strip().replace(":", "\\:").replace("'", "").replace('"', "")
                 font_file = pick_font_file()
@@ -316,23 +347,23 @@ def process_video_reel(
                 if font_file:
                     safe_font = os.path.abspath(font_file).replace("\\", "/").replace(":", "\\:")
                     font_arg = f":fontfile='{safe_font}'"
+                title_end_fb = min(5.0, total_dur_fb - 0.5)
                 filter_parts_fb.append(
                     f"{curr_v}drawtext=text='{clean_title}'{font_arg}:fontcolor=0xFFD700:fontsize=52:"
                     f"box=1:boxcolor=0x0B192C@0.85:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
-                    f"enable='between(t,0.5,5.0)'[v_titled]"
+                    f"enable='between(t,0.5,{title_end_fb:.2f})'[v_titled]"
                 )
                 curr_v = "[v_titled]"
 
             fb_has_audio = False
-            total_dur_fb = dur_per_clip * len(temp_segments)
             if music_path and os.path.exists(music_path):
                 cmd_inputs.extend(["-i", os.path.abspath(music_path)])
                 filter_parts_fb.append(
-                    f"[{fb_input_idx}:a]atrim=0:{total_dur_fb:.2f},afade=t=in:ss=0:d=1.0,afade=t=out:st={total_dur_fb-2.0:.2f}:d=2.0,volume=0.9[a_out]"
+                    f"[{fb_input_idx}:a]atrim=0:{total_dur_fb:.2f},afade=t=in:ss=0:d=1.0,afade=t=out:st={max(1.0, total_dur_fb-2.0):.2f}:d=2.0,volume=0.9[a_out]"
                 )
                 fb_has_audio = True
 
-            cmd_fb = [ffmpeg_bin, "-y"] + cmd_inputs + [
+            cmd_fb = [ffmpeg_bin, "-y", "-threads", "2"] + cmd_inputs + [
                 "-filter_complex", ";".join(filter_parts_fb),
                 "-map", curr_v,
             ]

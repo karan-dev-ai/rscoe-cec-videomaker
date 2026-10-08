@@ -252,11 +252,21 @@ generateBtn.addEventListener('click', async () => {
 });
 
 function pollJobStatus(jobId) {
+  let consecutiveErrors = 0;
   const interval = setInterval(async () => {
     try {
       const res = await fetch(`/api/job/${jobId}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= 10) {
+          clearInterval(interval);
+          showError('Connection lost or session expired. Please tap "Generate Video" again.');
+          resetGenerateButton();
+        }
+        return;
+      }
 
+      consecutiveErrors = 0;
       const job = await res.json();
       updateProgress(job.progress || 55, job.step || 'Processing video...');
 
@@ -289,6 +299,12 @@ function pollJobStatus(jobId) {
       }
     } catch (e) {
       console.error('Error polling status:', e);
+      consecutiveErrors++;
+      if (consecutiveErrors >= 10) {
+        clearInterval(interval);
+        showError('Network error while checking status. Please check your connection.');
+        resetGenerateButton();
+      }
     }
   }, 1000);
 }
