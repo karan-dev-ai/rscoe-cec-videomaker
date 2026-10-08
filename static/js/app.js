@@ -210,6 +210,9 @@ generateBtn.addEventListener('click', async () => {
   resultCard.classList.add('hidden');
   updateProgress(2, 'Initializing session...');
 
+  // Automatically activate the 5 PYQs Brain Drill so user is engaged while waiting!
+  loadQuizQuestions();
+
   try {
     // 1. Initialize session
     const sessionRes = await fetch('/api/jobs/create', { method: 'POST' });
@@ -247,7 +250,7 @@ generateBtn.addEventListener('click', async () => {
       throw new Error(err.detail || 'Failed to start video rendering.');
     }
 
-    // 4. Poll status during rendering (50% -> 100%)
+    // 4. Poll status during rendering with extreme mobile LTE resilience (50% -> 100%)
     pollJobStatus(job_id);
 
   } catch (err) {
@@ -258,14 +261,17 @@ generateBtn.addEventListener('click', async () => {
 
 function pollJobStatus(jobId) {
   let consecutiveErrors = 0;
+  const maxRetries = 90; // Up to ~2.5 minutes of continuous cellular drop resilience
+  
   const interval = setInterval(async () => {
     try {
       const res = await fetch(`/api/job/${jobId}`);
       if (!res.ok) {
         consecutiveErrors++;
-        if (consecutiveErrors >= 10) {
+        console.warn(`Job poll warning (${res.status}), retry ${consecutiveErrors}/${maxRetries}`);
+        if (consecutiveErrors >= maxRetries) {
           clearInterval(interval);
-          showError('Connection lost or session expired. Please tap "Generate Video" again.');
+          showError('Server connection lost. Please tap "Generate Video" to retry.');
           resetGenerateButton();
         }
         return;
@@ -278,6 +284,11 @@ function pollJobStatus(jobId) {
       if (job.status === 'completed') {
         clearInterval(interval);
         updateProgress(100, 'Video created successfully!');
+
+        // Notify user inside Quiz widget immediately
+        if (quizVideoReadyBanner) {
+          quizVideoReadyBanner.classList.remove('hidden');
+        }
 
         setTimeout(() => {
           progressContainer.classList.add('hidden');
@@ -294,8 +305,13 @@ function pollJobStatus(jobId) {
           }
 
           resetGenerateButton();
-          resultCard.scrollIntoView({ behavior: 'smooth' });
-        }, 500);
+          // If quiz is not finished, gently scroll to quiz so user can finish or tap View Video
+          if (!isQuizCompleted) {
+            quizVideoReadyBanner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          } else {
+            resultCard.scrollIntoView({ behavior: 'smooth' });
+          }
+        }, 600);
 
       } else if (job.status === 'failed') {
         clearInterval(interval);
@@ -303,15 +319,15 @@ function pollJobStatus(jobId) {
         resetGenerateButton();
       }
     } catch (e) {
-      console.error('Error polling status:', e);
+      console.warn('Network blip during polling, retaining session:', e);
       consecutiveErrors++;
-      if (consecutiveErrors >= 10) {
+      if (consecutiveErrors >= maxRetries) {
         clearInterval(interval);
-        showError('Network error while checking status. Please check your connection.');
+        showError('Network connection lost. Please check your signal and tap "Generate Video".');
         resetGenerateButton();
       }
     }
-  }, 1000);
+  }, 1500);
 }
 
 function resetGenerateButton() {
@@ -427,3 +443,174 @@ uploadSongBtn.addEventListener('click', async () => {
     uploadSongBtn.textContent = 'Add Song';
   }
 });
+
+// ==========================================
+// CEC Competitive Exam PYQ Brain Drill (UPSC / MPSC / CDS / AFCAT)
+// ==========================================
+let quizQuestions = [];
+let currentQuizIndex = 0;
+let quizScore = 0;
+let isAnswered = false;
+let isQuizCompleted = false;
+
+const quizContainer = document.getElementById('quizContainer');
+const quizVideoReadyBanner = document.getElementById('quizVideoReadyBanner');
+const quizScoreBadge = document.getElementById('quizScoreBadge');
+const quizCounterBadge = document.getElementById('quizCounterBadge');
+const quizExamBadge = document.getElementById('quizExamBadge');
+const quizSubjectBadge = document.getElementById('quizSubjectBadge');
+const quizQuestionText = document.getElementById('quizQuestionText');
+const quizOptionsList = document.getElementById('quizOptionsList');
+const quizExplanationBox = document.getElementById('quizExplanationBox');
+const quizExplanationText = document.getElementById('quizExplanationText');
+const quizNextBtn = document.getElementById('quizNextBtn');
+const quizNextBtnText = document.getElementById('quizNextBtnText');
+const quizRefreshBtn = document.getElementById('quizRefreshBtn');
+const quizActiveArea = document.getElementById('quizActiveArea');
+const quizCompletedArea = document.getElementById('quizCompletedArea');
+const quizFinalScoreMsg = document.getElementById('quizFinalScoreMsg');
+const quizRestartBtn = document.getElementById('quizRestartBtn');
+
+async function loadQuizQuestions() {
+  try {
+    if (!quizContainer) return;
+    quizContainer.classList.remove('hidden');
+    quizActiveArea.classList.remove('hidden');
+    quizCompletedArea.classList.add('hidden');
+    quizQuestionText.textContent = 'Loading authentic UPSC / MPSC / CDS / AFCAT PYQs...';
+    quizOptionsList.innerHTML = '';
+    quizExplanationBox.classList.add('hidden');
+    isQuizCompleted = false;
+
+    const res = await fetch('/api/quiz/questions');
+    if (!res.ok) throw new Error('Could not fetch quiz questions');
+    const data = await res.json();
+    quizQuestions = data.questions || [];
+    currentQuizIndex = 0;
+    quizScore = 0;
+    updateQuizScore();
+
+    if (quizQuestions.length > 0) {
+      renderQuizQuestion(currentQuizIndex);
+    }
+  } catch (err) {
+    console.error('Quiz fetch error:', err);
+  }
+}
+
+function updateQuizScore() {
+  if (quizScoreBadge) {
+    quizScoreBadge.textContent = `Score: ${quizScore} / ${quizQuestions.length || 5}`;
+  }
+}
+
+function renderQuizQuestion(index) {
+  if (!quizQuestions || index >= quizQuestions.length) return;
+  const q = quizQuestions[index];
+  isAnswered = false;
+
+  quizCounterBadge.textContent = `Q ${index + 1}/${quizQuestions.length}`;
+  quizExamBadge.textContent = q.exam || 'Competitive Exam PYQ';
+  quizSubjectBadge.textContent = `${q.domain} • ${q.subject}`;
+  quizQuestionText.textContent = q.question;
+
+  quizExplanationBox.classList.add('hidden');
+  quizExplanationText.textContent = '';
+  quizNextBtn.disabled = true;
+
+  if (index === quizQuestions.length - 1) {
+    quizNextBtnText.textContent = 'Finish & See Score';
+  } else {
+    quizNextBtnText.textContent = 'Next Question';
+  }
+
+  // Populate 4 options (A, B, C, D)
+  quizOptionsList.innerHTML = '';
+  const letters = ['A', 'B', 'C', 'D'];
+
+  q.options.forEach((optText, optIdx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'quiz-option-btn w-full text-left p-2.5 rounded-xl border border-slate-800 bg-slate-900/70 hover:bg-slate-800/80 hover:border-slate-700 text-xs text-slate-200 transition flex items-start space-x-2.5 cursor-pointer';
+
+    btn.innerHTML = `
+      <span class="w-5 h-5 rounded-md bg-slate-800 text-slate-400 font-bold flex items-center justify-center text-[10px] shrink-0 border border-slate-700 option-letter">
+        ${letters[optIdx]}
+      </span>
+      <span class="flex-1 font-medium option-text pt-0.5 leading-snug">${optText}</span>
+      <span class="option-icon text-xs hidden shrink-0 pt-0.5"></span>
+    `;
+
+    btn.addEventListener('click', () => handleOptionClick(optIdx));
+    quizOptionsList.appendChild(btn);
+  });
+}
+
+function handleOptionClick(selectedIdx) {
+  if (isAnswered) return;
+  isAnswered = true;
+
+  const q = quizQuestions[currentQuizIndex];
+  const optionButtons = quizOptionsList.querySelectorAll('.quiz-option-btn');
+  const isCorrect = selectedIdx === q.answer;
+
+  if (isCorrect) {
+    quizScore++;
+    updateQuizScore();
+  }
+
+  optionButtons.forEach((btn, idx) => {
+    btn.disabled = true;
+    btn.classList.remove('cursor-pointer');
+    const letterSpan = btn.querySelector('.option-letter');
+    const iconSpan = btn.querySelector('.option-icon');
+
+    if (idx === q.answer) {
+      // Correct option: Emerald Green
+      btn.className = 'quiz-option-btn w-full text-left p-2.5 rounded-xl border border-emerald-500/80 bg-emerald-500/15 text-xs text-emerald-200 font-semibold flex items-start space-x-2.5 transition';
+      letterSpan.className = 'w-5 h-5 rounded-md bg-emerald-500 text-slate-950 font-bold flex items-center justify-center text-[10px] shrink-0';
+      iconSpan.className = 'option-icon text-xs shrink-0 text-emerald-400 fa-solid fa-circle-check pt-0.5';
+      iconSpan.classList.remove('hidden');
+    } else if (idx === selectedIdx && !isCorrect) {
+      // Wrong option chosen: Rose Red
+      btn.className = 'quiz-option-btn w-full text-left p-2.5 rounded-xl border border-rose-500/80 bg-rose-500/15 text-xs text-rose-200 flex items-start space-x-2.5 transition';
+      letterSpan.className = 'w-5 h-5 rounded-md bg-rose-500 text-white font-bold flex items-center justify-center text-[10px] shrink-0';
+      iconSpan.className = 'option-icon text-xs shrink-0 text-rose-400 fa-solid fa-circle-xmark pt-0.5';
+      iconSpan.classList.remove('hidden');
+    } else {
+      btn.classList.add('opacity-40');
+    }
+  });
+
+  // Reveal Concept & Explanation
+  quizExplanationText.textContent = q.explanation || 'Refer to standard competitive exam syllabus reference.';
+  quizExplanationBox.classList.remove('hidden');
+  quizNextBtn.disabled = false;
+}
+
+if (quizNextBtn) {
+  quizNextBtn.addEventListener('click', () => {
+    if (currentQuizIndex < quizQuestions.length - 1) {
+      currentQuizIndex++;
+      renderQuizQuestion(currentQuizIndex);
+    } else {
+      isQuizCompleted = true;
+      quizActiveArea.classList.add('hidden');
+      quizCompletedArea.classList.remove('hidden');
+      quizFinalScoreMsg.textContent = `You scored ${quizScore} out of ${quizQuestions.length} on this PYQ drill!`;
+    }
+  });
+}
+
+if (quizRefreshBtn) {
+  quizRefreshBtn.addEventListener('click', () => loadQuizQuestions());
+}
+
+if (quizRestartBtn) {
+  quizRestartBtn.addEventListener('click', () => loadQuizQuestions());
+}
+
+window.scrollToResultCard = function() {
+  resultCard.classList.remove('hidden');
+  resultCard.scrollIntoView({ behavior: 'smooth' });
+};

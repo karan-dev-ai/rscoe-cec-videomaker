@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.processor import process_video_reel, pick_music_track, get_media_duration
+from core.quiz_bank import get_random_quiz_set
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("app")
@@ -302,6 +303,11 @@ async def get_job_status(job_id: str):
 @app.get("/api/debug/jobs")
 async def debug_jobs():
     return {"jobs": JOBS}
+
+@app.get("/api/quiz/questions")
+async def get_quiz_questions():
+    """Return 5 randomized authentic competitive exam PYQs (UPSC, MPSC, CDS, AFCAT)."""
+    return {"questions": get_random_quiz_set(5)}
 
 @app.get("/api/download/{filename}")
 async def download_video(filename: str):

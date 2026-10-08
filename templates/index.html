@@ -49,9 +49,14 @@
         </div>
       </div>
       <div class="flex items-center space-x-2">
-        <button id="openMusicModalBtn" class="text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition flex items-center gap-1.5">
+        <button id="openQuizBtn" onclick="loadQuizQuestions(); document.getElementById('quizContainer').scrollIntoView({ behavior: 'smooth' });" class="text-xs text-brand-300 hover:text-white bg-brand-500/10 hover:bg-brand-500/20 px-2.5 py-1.5 rounded-lg border border-brand-500/30 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-brain text-brand-400"></i>
+          <span class="hidden sm:inline">5 PYQs Drill</span>
+          <span class="sm:hidden">Quiz</span>
+        </button>
+        <button id="openMusicModalBtn" class="text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 rounded-lg border border-slate-700 transition flex items-center gap-1.5">
           <i class="fa-solid fa-music text-brand-400"></i>
-          <span>Study Music ({{ songs|length }})</span>
+          <span>Music ({{ songs|length }})</span>
         </button>
       </div>
     </div>
@@ -163,6 +168,101 @@
         <p class="text-xs text-slate-500 text-center">
           Uploading clips & rendering usually takes only 15–30 seconds. Please keep this page open.
         </p>
+      </div>
+
+      <!-- Interactive 5-Question PYQ Quiz Widget (UPSC / MPSC / CDS / AFCAT) -->
+      <div id="quizContainer" class="hidden pt-4 border-t border-slate-800 space-y-3">
+        <!-- Video Ready Notification inside Quiz -->
+        <div id="quizVideoReadyBanner" class="hidden p-3 bg-gradient-to-r from-emerald-500/20 to-brand-500/20 border border-emerald-500/50 rounded-xl flex items-center justify-between">
+          <div class="flex items-center space-x-2 text-emerald-300 text-xs font-bold">
+            <i class="fa-solid fa-circle-check text-base text-emerald-400"></i>
+            <span>🎬 Your Video Reel is Ready!</span>
+          </div>
+          <button type="button" onclick="scrollToResultCard()" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold px-3 py-1.5 rounded-lg transition shadow">
+            View Video ➔
+          </button>
+        </div>
+
+        <!-- Quiz Card -->
+        <div class="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-xl">
+          <div class="flex items-center justify-between pb-2 border-b border-slate-800/80">
+            <div class="flex items-center space-x-2">
+              <span class="w-6 h-6 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center text-xs">
+                <i class="fa-solid fa-brain"></i>
+              </span>
+              <div>
+                <h3 class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                  <span>CEC PYQ Brain Drill</span>
+                  <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">5 PYQs</span>
+                </h3>
+                <p class="text-[10px] text-slate-400">Solve competitive exam questions while your video renders!</p>
+              </div>
+            </div>
+            <div class="flex items-center space-x-2">
+              <span id="quizScoreBadge" class="text-xs font-bold font-mono px-2.5 py-1 rounded-full bg-slate-900 text-brand-400 border border-slate-800">
+                Score: 0 / 5
+              </span>
+              <span id="quizCounterBadge" class="text-[11px] font-semibold text-slate-400">
+                Q 1/5
+              </span>
+            </div>
+          </div>
+
+          <!-- Active Question Box -->
+          <div id="quizActiveArea" class="space-y-3">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span id="quizExamBadge" class="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                UPSC CSE Prelims PYQ
+              </span>
+              <span id="quizSubjectBadge" class="text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-800 text-slate-300">
+                General Awareness
+              </span>
+            </div>
+
+            <p id="quizQuestionText" class="text-xs font-semibold text-slate-100 leading-relaxed min-h-[36px]">
+              Loading question...
+            </p>
+
+            <div id="quizOptionsList" class="space-y-2 pt-1">
+              <!-- Dynamically populated options -->
+            </div>
+
+            <!-- Explanation Box -->
+            <div id="quizExplanationBox" class="hidden p-3 bg-slate-900/90 border border-slate-700/70 rounded-xl space-y-1 text-xs">
+              <div class="flex items-center gap-1.5 text-brand-400 font-bold text-[11px]">
+                <i class="fa-solid fa-lightbulb"></i>
+                <span>Concept & Explanation</span>
+              </div>
+              <p id="quizExplanationText" class="text-slate-300 text-[11px] leading-relaxed"></p>
+            </div>
+
+            <!-- Actions Row -->
+            <div class="flex items-center justify-between pt-1">
+              <button id="quizRefreshBtn" type="button" class="text-slate-500 hover:text-slate-300 text-xs flex items-center gap-1 transition">
+                <i class="fa-solid fa-arrows-rotate text-[10px]"></i>
+                <span>New 5 Questions</span>
+              </button>
+              <button id="quizNextBtn" type="button" disabled class="bg-brand-500 hover:bg-brand-400 disabled:opacity-30 disabled:cursor-not-allowed text-slate-950 font-bold text-xs py-2 px-4 rounded-lg transition flex items-center gap-1.5 shadow">
+                <span id="quizNextBtnText">Next Question</span>
+                <i class="fa-solid fa-arrow-right text-[10px]"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Completed Area -->
+          <div id="quizCompletedArea" class="hidden py-4 text-center space-y-3">
+            <div class="w-12 h-12 mx-auto rounded-full bg-brand-500/20 text-brand-400 flex items-center justify-center text-xl">
+              <i class="fa-solid fa-award"></i>
+            </div>
+            <div>
+              <h4 class="text-sm font-bold text-white">Drill Completed!</h4>
+              <p id="quizFinalScoreMsg" class="text-xs text-slate-400 pt-0.5">Your Score: 0 out of 5</p>
+            </div>
+            <button id="quizRestartBtn" type="button" class="bg-brand-500 hover:bg-brand-400 text-slate-950 font-bold text-xs py-2 px-4 rounded-xl transition shadow">
+              🔄 Practice 5 More PYQs
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Error Notification Box -->
