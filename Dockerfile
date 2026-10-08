@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
-# Install system ffmpeg and essential tools
+# Install system ffmpeg, fonts, and essential tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    fonts-dejavu-core \
+    fontconfig \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -23,7 +25,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 COPY --chown=user:user . .
 
 # Ensure working directories exist with proper write permissions
-RUN mkdir -p uploads outputs assets/music assets/logo
+RUN mkdir -p uploads outputs assets/music assets/logo assets/fonts
 
 EXPOSE 8000
 EXPOSE 10000

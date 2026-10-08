@@ -114,25 +114,64 @@ def process_video_reel(
                 return False, f"Failed processing clip #{i+1}"
             temp_segments.append(seg_out)
 
-        # Phase 2: Concatenate all upright segments
-        concat_list_file = os.path.join(temp_dir, "concat_list.txt")
-        with open(concat_list_file, "w") as f:
-            for seg in temp_segments:
-                safe_path = os.path.abspath(seg).replace("\\", "/")
-                f.write(f"file '{safe_path}'\n")
+        # Phase 2: Concatenate all upright segments into merged_upright.ts
+        merged_raw = os.path.join(temp_dir, "merged_upright.ts")
 
-        merged_raw = os.path.join(temp_dir, "merged_upright.mp4")
+        # Strategy 1: Native MPEG-TS concat protocol (fastest, stream copy without container mismatch)
+        ts_paths = [os.path.abspath(s).replace("\\", "/") for s in temp_segments]
+        concat_str = "|".join(ts_paths)
         concat_cmd = [
             ffmpeg_bin, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list_file,
+            "-i", f"concat:{concat_str}",
             "-c", "copy",
             merged_raw
         ]
         res = subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0 or not os.path.exists(merged_raw):
-            return False, f"Failed concatenating upright clips: {res.stderr}"
+
+        # Strategy 2: Concat demuxer with relative paths inside temp_dir
+        if res.returncode != 0 or not os.path.exists(merged_raw) or os.path.getsize(merged_raw) == 0:
+            logger.warning("Concat protocol failed, trying demuxer...")
+            concat_list_file = os.path.join(temp_dir, "concat_list.txt")
+            with open(concat_list_file, "w") as f:
+                for seg in temp_segments:
+                    f.write(f"file '{os.path.basename(seg)}'\n")
+
+            concat_cmd_demux = [
+                ffmpeg_bin, "-y",
+                "-fflags", "+genpts",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", "concat_list.txt",
+                "-c", "copy",
+                "merged_upright.ts"
+            ]
+            res = subprocess.run(concat_cmd_demux, cwd=temp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        # Strategy 3: Concat filter (re-encode) if stream copy cannot be performed
+        if res.returncode != 0 or not os.path.exists(merged_raw) or os.path.getsize(merged_raw) == 0:
+            logger.warning("Stream copy concat failed, re-encoding via concat filter...")
+            filter_inputs = []
+            concat_stream_tags = ""
+            for idx, seg in enumerate(temp_segments):
+                filter_inputs.extend(["-i", os.path.abspath(seg)])
+                concat_stream_tags += f"[{idx}:v]"
+
+            filter_concat_cmd = [
+                ffmpeg_bin, "-y"
+            ] + filter_inputs + [
+                "-filter_complex", f"{concat_stream_tags}concat=n={len(temp_segments)}:v=1:a=0[v_cat]",
+                "-map", "[v_cat]",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "20",
+                merged_raw
+            ]
+            res = subprocess.run(filter_concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        if res.returncode != 0 or not os.path.exists(merged_raw) or os.path.getsize(merged_raw) == 0:
+            err_snip = res.stderr[-300:].strip() if res.stderr else "Unknown concatenation error"
+            logger.error(f"Failed concatenating clips: {err_snip}")
+            return False, f"Failed concatenating upright clips: {err_snip}"
 
         total_actual_dur = get_media_duration(merged_raw)
 
@@ -158,11 +197,17 @@ def process_video_reel(
         # Optional Title overlay on the first 3.5 seconds
         if title_text and title_text.strip():
             clean_title = title_text.strip().replace(":", "\\:").replace("'", "").replace('"', "")
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            bundled_font = os.path.join(base_dir, "assets", "fonts", "font.ttf")
+
             font_opt = ""
-            if os.path.exists("C:/Windows/Fonts/arialbd.ttf"):
+            if os.path.exists(bundled_font):
+                safe_font = os.path.abspath(bundled_font).replace("\\", "/").replace(":", "\\:")
+                font_opt = f":fontfile='{safe_font}'"
+            elif os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+                font_opt = ":fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'"
+            elif os.path.exists("C:/Windows/Fonts/arialbd.ttf"):
                 font_opt = ":fontfile='C\\:/Windows/Fonts/arialbd.ttf'"
-            elif os.path.exists("C:/Windows/Fonts/arial.ttf"):
-                font_opt = ":fontfile='C\\:/Windows/Fonts/arial.ttf'"
 
             filter_parts.append(
                 f"{current_v}drawtext=text='{clean_title}'{font_opt}:fontcolor=white:fontsize=36:"
@@ -234,10 +279,10 @@ def process_video_reel(
             for s in temp_segments:
                 if os.path.exists(s):
                     os.remove(s)
-            if os.path.exists(os.path.join(temp_dir, "concat_list.txt")):
-                os.remove(os.path.join(temp_dir, "concat_list.txt"))
-            if os.path.exists(os.path.join(temp_dir, "merged_upright.mp4")):
-                os.remove(os.path.join(temp_dir, "merged_upright.mp4"))
+            for f_tmp in ["concat_list.txt", "merged_upright.mp4", "merged_upright.ts"]:
+                p_tmp = os.path.join(temp_dir, f_tmp)
+                if os.path.exists(p_tmp):
+                    os.remove(p_tmp)
             if os.path.exists(temp_dir):
                 os.rmdir(temp_dir)
         except Exception:
