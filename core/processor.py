@@ -7,12 +7,26 @@ import shutil
 from typing import List, Optional, Tuple
 import imageio_ffmpeg
 
-logger = logging.getLogger("video_processor")
+# Prefer system FFmpeg (e.g. /usr/bin/ffmpeg in Docker) which is compiled with libfreetype & full filters
+system_ffmpeg = shutil.which("ffmpeg")
+if system_ffmpeg and os.path.exists(system_ffmpeg):
+    ffmpeg_bin = system_ffmpeg
+else:
+    try:
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg_bin = "ffmpeg"
 
-try:
-    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
-except Exception:
-    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+def is_filter_supported(name: str) -> bool:
+    try:
+        res = subprocess.run([ffmpeg_bin, "-h", f"filter={name}"], capture_output=True, text=True, timeout=5)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+HAS_DRAWTEXT = is_filter_supported("drawtext")
+HAS_XFADE = is_filter_supported("xfade")
+logger.info(f"Using FFmpeg: {ffmpeg_bin} (drawtext: {HAS_DRAWTEXT}, xfade: {HAS_XFADE})")
 
 def get_media_duration(file_path: str) -> float:
     """Get the duration of a video or audio file using ffmpeg."""
@@ -241,8 +255,12 @@ def process_video_reel(
             current_v = "[v_with_logo]"
 
         # Overlay Title: Starting 5 seconds, BIGGER (size 52), BOLD, and COLOURFUL
-        if title_text and title_text.strip():
-            clean_title = title_text.strip().replace(":", "\\:").replace("'", "").replace('"', "")
+        if title_text and title_text.strip() and HAS_DRAWTEXT:
+            title_file_path = os.path.join(temp_dir, "title.txt")
+            with open(title_file_path, "w", encoding="utf-8") as tf:
+                tf.write(title_text.strip())
+            safe_title_file = title_file_path.replace("\\", "/").replace(":", "\\:")
+
             palette = random.choice(TITLE_PALETTES)
             font_file = pick_font_file()
             font_arg = ""
@@ -253,7 +271,7 @@ def process_video_reel(
             title_end = min(5.0, actual_total_video_dur - 0.5)
             if title_end > 1.0:
                 filter_parts.append(
-                    f"{current_v}drawtext=text='{clean_title}'{font_arg}:fontcolor={palette['color']}:fontsize=52:"
+                    f"{current_v}drawtext=textfile='{safe_title_file}'{font_arg}:fontcolor={palette['color']}:fontsize=52:"
                     f"box=1:boxcolor={palette['box']}:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
                     f"enable='between(t,0.5,{title_end:.2f})'[v_titled]"
                 )
@@ -314,10 +332,10 @@ def process_video_reel(
         logger.info(f"Executing final composition ({actual_total_video_dur:.1f}s)...")
         res = subprocess.run(final_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
-        # Fallback: If xfade somehow fails, fall back to standard concat filter
+        # Fallback 1: If xfade somehow fails, fall back to standard concat filter
         if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             update_progress(97, "Finalizing with high-compatibility engine...")
-            logger.warning("xfade failed, attempting concat filter fallback...")
+            logger.warning("Primary composition failed, attempting concat filter fallback...")
 
             filter_parts_fb = []
             concat_tags = "".join([f"[{k}:v]" for k in range(len(temp_segments))])
@@ -340,8 +358,13 @@ def process_video_reel(
 
             total_dur_fb = sum(segment_durations) if segment_durations else dur_per_clip * len(temp_segments)
 
-            if title_text and title_text.strip():
-                clean_title = title_text.strip().replace(":", "\\:").replace("'", "").replace('"', "")
+            if title_text and title_text.strip() and HAS_DRAWTEXT:
+                title_file_path = os.path.join(temp_dir, "title.txt")
+                if not os.path.exists(title_file_path):
+                    with open(title_file_path, "w", encoding="utf-8") as tf:
+                        tf.write(title_text.strip())
+                safe_title_file = title_file_path.replace("\\", "/").replace(":", "\\:")
+
                 font_file = pick_font_file()
                 font_arg = ""
                 if font_file:
@@ -349,7 +372,7 @@ def process_video_reel(
                     font_arg = f":fontfile='{safe_font}'"
                 title_end_fb = min(5.0, total_dur_fb - 0.5)
                 filter_parts_fb.append(
-                    f"{curr_v}drawtext=text='{clean_title}'{font_arg}:fontcolor=0xFFD700:fontsize=52:"
+                    f"{curr_v}drawtext=textfile='{safe_title_file}'{font_arg}:fontcolor=0xFFD700:fontsize=52:"
                     f"box=1:boxcolor=0x0B192C@0.85:boxborderw=20:x=(w-text_w)/2:y=(h-text_h)/2:"
                     f"enable='between(t,0.5,{title_end_fb:.2f})'[v_titled]"
                 )
@@ -379,6 +402,46 @@ def process_video_reel(
                 os.path.abspath(output_path)
             ])
             res = subprocess.run(cmd_fb, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        # Fallback 2: Fail-safe minimal composition (guaranteed success)
+        if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.warning("Attempting safe minimal composition...")
+            update_progress(98, "Finalizing minimal reel composition...")
+            cmd_safe = [ffmpeg_bin, "-y", "-threads", "2"]
+            for s in temp_segments:
+                cmd_safe.extend(["-i", os.path.abspath(s)])
+
+            filter_safe = []
+            concat_tags = "".join([f"[{k}:v]" for k in range(len(temp_segments))])
+            filter_safe.append(f"{concat_tags}concat=n={len(temp_segments)}:v=1:a=0[v_safe]")
+            safe_v = "[v_safe]"
+            safe_idx = len(temp_segments)
+
+            if logo_path and os.path.exists(logo_path):
+                cmd_safe.extend(["-i", os.path.abspath(logo_path)])
+                filter_safe.append(f"[{safe_idx}:v]scale={logo_scale_width}:-1[l_s];{safe_v}[l_s]overlay=main_w-overlay_w-24:24[v_with_logo]")
+                safe_v = "[v_with_logo]"
+                safe_idx += 1
+
+            total_dur_safe = sum(segment_durations) if segment_durations else dur_per_clip * len(temp_segments)
+            safe_has_audio = False
+            if music_path and os.path.exists(music_path):
+                cmd_safe.extend(["-i", os.path.abspath(music_path)])
+                filter_safe.append(f"[{safe_idx}:a]atrim=0:{total_dur_safe:.2f},afade=t=in:ss=0:d=1.0,afade=t=out:st={max(1.0, total_dur_safe-2.0):.2f}:d=2.0,volume=0.9[a_safe]")
+                safe_has_audio = True
+
+            cmd_safe.extend(["-filter_complex", ";".join(filter_safe), "-map", safe_v])
+            if safe_has_audio:
+                cmd_safe.extend(["-map", "[a_safe]", "-c:a", "aac", "-b:a", "192k"])
+            else:
+                cmd_safe.append("-an")
+
+            cmd_safe.extend([
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p",
+                "-t", f"{total_dur_safe:.2f}", "-movflags", "+faststart",
+                os.path.abspath(output_path)
+            ])
+            res = subprocess.run(cmd_safe, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         if res.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             err_snip = res.stderr[-300:].strip() if res.stderr else f"Exit code {res.returncode}"
