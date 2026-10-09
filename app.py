@@ -399,9 +399,24 @@ async def debug_jobs():
     return {"jobs": JOBS}
 
 @app.get("/api/quiz/questions")
-async def get_quiz_questions():
-    """Return 5 randomized authentic competitive exam PYQs (UPSC, MPSC, CDS, AFCAT)."""
-    return {"questions": get_random_quiz_set(5)}
+async def get_quiz_questions(seen: Optional[str] = None):
+    """Return 5 randomized authentic competitive exam PYQs, excluding previously seen questions."""
+    exclude_ids = set()
+    if seen:
+        exclude_ids = {s.strip() for s in seen.split(",") if s.strip()}
+    return {"questions": get_random_quiz_set(5, exclude_ids=exclude_ids)}
+
+@app.post("/api/quiz/questions")
+async def get_quiz_questions_post(payload: Optional[dict] = None):
+    """POST endpoint for fetching unseen questions with JSON list of previously seen question IDs."""
+    exclude_ids = set()
+    if payload and "seen" in payload:
+        raw_seen = payload["seen"]
+        if isinstance(raw_seen, list):
+            exclude_ids = {str(s).strip() for s in raw_seen if str(s).strip()}
+        elif isinstance(raw_seen, str):
+            exclude_ids = {s.strip() for s in raw_seen.split(",") if s.strip()}
+    return {"questions": get_random_quiz_set(5, exclude_ids=exclude_ids)}
 
 @app.get("/api/download/{filename}")
 async def download_video(filename: str):

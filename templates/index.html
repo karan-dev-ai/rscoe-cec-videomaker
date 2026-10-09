@@ -193,9 +193,9 @@
               <div>
                 <h3 class="text-xs font-bold text-slate-100 flex items-center gap-1.5">
                   <span>CEC PYQ Brain Drill</span>
-                  <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">5 PYQs</span>
+                  <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">5 PYQs • Zero Repetition</span>
                 </h3>
-                <p class="text-[10px] text-slate-400">Solve competitive exam questions while your video renders!</p>
+                <p class="text-[10px] text-slate-400">Solve authentic competitive exam PYQs (questions never repeat)!</p>
               </div>
             </div>
             <div class="flex items-center space-x-2">
@@ -238,10 +238,16 @@
 
             <!-- Actions Row -->
             <div class="flex items-center justify-between pt-1">
-              <button id="quizRefreshBtn" type="button" class="text-slate-500 hover:text-slate-300 text-xs flex items-center gap-1 transition">
-                <i class="fa-solid fa-arrows-rotate text-[10px]"></i>
-                <span>New 5 Questions</span>
-              </button>
+              <div class="flex items-center gap-3">
+                <button id="quizRefreshBtn" type="button" class="text-slate-400 hover:text-white text-xs flex items-center gap-1.5 transition">
+                  <i class="fa-solid fa-arrows-rotate text-[10px]"></i>
+                  <span>New 5 Questions</span>
+                </button>
+                <button id="quizResetHistoryBtn" type="button" onclick="resetQuizHistory()" title="Clear memory and start fresh question cycle" class="text-slate-500 hover:text-amber-400 text-[10px] flex items-center gap-1 transition">
+                  <i class="fa-solid fa-rotate-left text-[9px]"></i>
+                  <span>Reset Drill History</span>
+                </button>
+              </div>
               <button id="quizNextBtn" type="button" disabled class="bg-brand-500 hover:bg-brand-400 disabled:opacity-30 disabled:cursor-not-allowed text-slate-950 font-bold text-xs py-2 px-4 rounded-lg transition flex items-center gap-1.5 shadow">
                 <span id="quizNextBtnText">Next Question</span>
                 <i class="fa-solid fa-arrow-right text-[10px]"></i>

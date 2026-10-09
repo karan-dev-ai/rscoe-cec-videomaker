@@ -563,7 +563,24 @@ async function loadQuizQuestions() {
     quizExplanationBox.classList.add('hidden');
     isQuizCompleted = false;
 
-    const res = await fetch('/api/quiz/questions');
+    // Load seen questions from localStorage to guarantee ZERO repetition
+    let seenIds = [];
+    try {
+      const stored = localStorage.getItem('cec_seen_quiz_ids');
+      if (stored) {
+        seenIds = JSON.parse(stored);
+        if (!Array.isArray(seenIds)) seenIds = [];
+      }
+    } catch (e) {
+      seenIds = [];
+    }
+
+    // Request non-repeating questions from server
+    const res = await fetch('/api/quiz/questions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seen: seenIds })
+    });
     if (!res.ok) throw new Error('Could not fetch quiz questions');
     const data = await res.json();
     quizQuestions = data.questions || [];
@@ -571,12 +588,33 @@ async function loadQuizQuestions() {
     quizScore = 0;
     updateQuizScore();
 
+    // Save newly retrieved questions into seenIds so they are never repeated
     if (quizQuestions.length > 0) {
+      quizQuestions.forEach(q => {
+        if (q.id && !seenIds.includes(q.id)) {
+          seenIds.push(q.id);
+        }
+      });
+      // Retain sliding window up to 80 items so pool rotates cleanly without duplicate clustering
+      if (seenIds.length > 85) {
+        seenIds = seenIds.slice(-65);
+      }
+      try {
+        localStorage.setItem('cec_seen_quiz_ids', JSON.stringify(seenIds));
+      } catch (e) {}
+
       renderQuizQuestion(currentQuizIndex);
     }
   } catch (err) {
     console.error('Quiz fetch error:', err);
   }
+}
+
+function resetQuizHistory() {
+  try {
+    localStorage.removeItem('cec_seen_quiz_ids');
+  } catch (e) {}
+  loadQuizQuestions();
 }
 
 function updateQuizScore() {
