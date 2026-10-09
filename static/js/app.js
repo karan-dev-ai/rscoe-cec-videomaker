@@ -1,4 +1,5 @@
-// CEC Video Maker Frontend Logic - Sequential Robust Upload & Generator
+// CEC Video Maker Frontend Logic - 1MB Resumable Chunked Engine
+console.log('%c[CEC RSCOE Auto Maker] v3.0 Resumable Chunked Engine Loaded', 'color: #10b981; font-weight: bold;');
 let selectedFiles = [];
 let activeAudio = null;
 
@@ -160,8 +161,10 @@ function updateProgress(percent, stepText) {
   progressStep.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> <span>${stepText}</span>`;
 }
 
-// Upload a single clip with automatic 3x auto-retry on cellular network hiccup
-function uploadClipWithRetry(jobId, file, index, totalFiles, maxRetries = 3) {
+const CHUNK_SIZE = 1024 * 1024; // 1 MB slices (ultra-resilient on mobile cellular LTE)
+
+// Upload a single 1MB slice with automatic 3x auto-retry on cellular network hiccup
+function uploadChunkWithRetry(jobId, chunkBlob, clipIndex, chunkIndex, totalChunks, filename, maxRetries = 3) {
   let attempt = 0;
 
   function attemptUpload() {
@@ -169,33 +172,19 @@ function uploadClipWithRetry(jobId, file, index, totalFiles, maxRetries = 3) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const formData = new FormData();
-      formData.append('clip_index', index);
-      formData.append('clip', file);
+      formData.append('clip_index', clipIndex);
+      formData.append('chunk_index', chunkIndex);
+      formData.append('total_chunks', totalChunks);
+      formData.append('filename', filename);
+      formData.append('chunk', chunkBlob, filename);
 
-      // Generous 180s timeout per clip for cellular mobile upload
-      xhr.timeout = 180000;
-
-      const baseProgress = (index / totalFiles) * 50;
-      const clipWeight = (1 / totalFiles) * 50;
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const filePct = (e.loaded / e.total);
-          const overallPct = baseProgress + (filePct * clipWeight);
-          const mbUploaded = (e.loaded / (1024 * 1024)).toFixed(1);
-          const mbTotal = (e.total / (1024 * 1024)).toFixed(1);
-          updateProgress(
-            overallPct,
-            `Uploading clip ${index + 1} of ${totalFiles} (${Math.round(filePct * 100)}% • ${mbUploaded}/${mbTotal}MB)...`
-          );
-        }
-      };
+      // Generous 90s timeout for a 1MB chunk (even 2G speeds need <15s for 1MB)
+      xhr.timeout = 90000;
 
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
-            const res = JSON.parse(xhr.responseText);
-            resolve(res);
+            resolve(JSON.parse(xhr.responseText));
           } catch (e) {
             resolve({});
           }
@@ -207,47 +196,70 @@ function uploadClipWithRetry(jobId, file, index, totalFiles, maxRetries = 3) {
           } catch (e) {}
 
           if (xhr.status >= 500 && attempt < maxRetries) {
-            console.warn(`Server ${xhr.status} on clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
-            updateProgress(baseProgress, `⚠️ Server busy on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+            console.warn(`Server busy on chunk ${chunkIndex + 1}/${totalChunks}. Retrying (${attempt}/${maxRetries})...`);
             setTimeout(() => {
               attemptUpload().then(resolve).catch(reject);
-            }, 1500);
+            }, 1200);
           } else {
-            reject(new Error(`Failed uploading clip #${index + 1} (${file.name}): ${errDetail}`));
+            reject(new Error(`Failed uploading part ${chunkIndex + 1} of clip #${clipIndex + 1}: ${errDetail}`));
           }
         }
       };
 
       xhr.ontimeout = () => {
         if (attempt < maxRetries) {
-          console.warn(`Timeout uploading clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
-          updateProgress(baseProgress, `⚠️ Network slow on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          console.warn(`Timeout on chunk ${chunkIndex + 1}/${totalChunks}. Retrying (${attempt}/${maxRetries})...`);
           setTimeout(() => {
             attemptUpload().then(resolve).catch(reject);
-          }, 1500);
+          }, 1200);
         } else {
-          reject(new Error(`Cellular timeout uploading clip #${index + 1} (${file.name}). Tap below to resume.`));
+          reject(new Error(`Network timeout uploading part ${chunkIndex + 1} of clip #${clipIndex + 1}. Check cellular connection.`));
         }
       };
 
       xhr.onerror = () => {
         if (attempt < maxRetries) {
-          console.warn(`Network error on clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
-          updateProgress(baseProgress, `⚠️ Cellular hiccup on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          console.warn(`Cellular drop on chunk ${chunkIndex + 1}/${totalChunks}. Retrying (${attempt}/${maxRetries})...`);
           setTimeout(() => {
             attemptUpload().then(resolve).catch(reject);
-          }, 1500);
+          }, 1200);
         } else {
-          reject(new Error(`Cellular connection dropped on clip #${index + 1} (${file.name}). Don't worry, your files are safe! Tap below to resume.`));
+          reject(new Error(`Cellular drop while uploading part ${chunkIndex + 1} of clip #${clipIndex + 1}. Don't worry, your files are safe! Tap below to resume.`));
         }
       };
 
-      xhr.open('POST', `/api/jobs/${jobId}/upload_clip`, true);
+      xhr.open('POST', `/api/jobs/${jobId}/upload_chunk`, true);
       xhr.send(formData);
     });
   }
 
   return attemptUpload();
+}
+
+// Upload a full clip sliced into 1MB chunks
+async function uploadClipChunked(jobId, file, clipIndex, totalClips) {
+  const fileSize = file.size;
+  const totalChunks = Math.max(1, Math.ceil(fileSize / CHUNK_SIZE));
+  const baseClipProgress = (clipIndex / totalClips) * 50;
+  const clipProgressWeight = (1 / totalClips) * 50;
+
+  for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+    const start = chunkIdx * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, fileSize);
+    const chunkBlob = file.slice(start, end);
+
+    const chunkPct = (chunkIdx + 1) / totalChunks;
+    const currentProgress = baseClipProgress + (chunkPct * clipProgressWeight);
+    const mbUploaded = (end / (1024 * 1024)).toFixed(1);
+    const mbTotal = (fileSize / (1024 * 1024)).toFixed(1);
+
+    updateProgress(
+      currentProgress,
+      `Uploading clip ${clipIndex + 1} of ${totalClips} (${Math.round(chunkPct * 100)}% • ${mbUploaded}/${mbTotal}MB • Part ${chunkIdx + 1}/${totalChunks})...`
+    );
+
+    await uploadChunkWithRetry(jobId, chunkBlob, clipIndex, chunkIdx, totalChunks, file.name);
+  }
 }
 
 async function startVideoPipeline(startClipIndex = 0) {
@@ -265,7 +277,7 @@ async function startVideoPipeline(startClipIndex = 0) {
   // Automatically activate the 5 PYQs Brain Drill so user is engaged while waiting!
   loadQuizQuestions();
 
-  const total = selectedFiles.length;
+  const totalClips = selectedFiles.length;
 
   try {
     // 1. Initialize session if starting fresh
@@ -281,10 +293,10 @@ async function startVideoPipeline(startClipIndex = 0) {
 
     const job_id = currentJobId;
 
-    // 2. Upload clips strictly sequentially (concurrency=1) for stable mobile LTE transmission (0% -> 50%)
-    for (let i = startClipIndex; i < total; i++) {
+    // 2. Upload clips sequentially using 1MB chunks (100% resilient to mobile LTE drops)
+    for (let i = startClipIndex; i < totalClips; i++) {
       resumeIndex = i;
-      await uploadClipWithRetry(job_id, selectedFiles[i], i, total);
+      await uploadClipChunked(job_id, selectedFiles[i], i, totalClips);
     }
 
     updateProgress(50, 'All clips uploaded! Starting FFmpeg video engine...');
@@ -311,12 +323,12 @@ async function startVideoPipeline(startClipIndex = 0) {
   } catch (err) {
     console.error(err);
     const failedIdx = resumeIndex;
-    const canResume = currentJobId && failedIdx < total;
+    const canResume = currentJobId && failedIdx < totalClips;
     if (canResume && resumeUploadBtnText) {
       resumeUploadBtnText.textContent = `🔄 Tap to Resume Uploading Clip #${failedIdx + 1}`;
     }
     showError(
-      err.message || 'An unexpected error occurred.',
+      err.message || 'An unexpected upload issue occurred.',
       canResume ? () => startVideoPipeline(failedIdx) : null
     );
     resetGenerateButton();

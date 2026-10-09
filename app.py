@@ -42,6 +42,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".js", ".html")):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -107,10 +117,11 @@ async def index_page(request: Request):
         for f in os.listdir(MUSIC_DIR):
             if f.lower().endswith((".mp3", ".wav", ".m4a", ".aac")):
                 songs.append(f)
+    v = int(time.time())
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"songs": sorted(songs), "has_logo": os.path.exists(LOGO_PATH)}
+        context={"songs": sorted(songs), "has_logo": os.path.exists(LOGO_PATH), "v": v}
     )
 
 @app.get("/api/songs")
@@ -154,7 +165,72 @@ async def create_job_session():
     logger.info(f"Initialized job session {job_id}")
     return {"job_id": job_id}
 
-# Step 2 of robust upload: Upload individual clip (handles large files smoothly)
+# Step 2: Resumable chunked upload for ultra-reliable mobile cellular uploads
+@app.post("/api/jobs/{job_id}/upload_chunk")
+async def upload_chunk(
+    job_id: str,
+    clip_index: int = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    filename: str = Form(...),
+    chunk: UploadFile = File(...)
+):
+    job = load_job_state(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job session expired or not found.")
+
+    job_upload_dir = os.path.join(UPLOADS_DIR, job_id)
+    os.makedirs(job_upload_dir, exist_ok=True)
+
+    ext = os.path.splitext(filename)[1] or ".mp4"
+    part_path = os.path.join(job_upload_dir, f"clip_{clip_index:03d}.part_{chunk_index:05d}")
+    final_save_path = os.path.join(job_upload_dir, f"clip_{clip_index:03d}{ext}")
+
+    try:
+        content = await chunk.read()
+        with open(part_path, "wb") as pf:
+            pf.write(content)
+
+        is_complete = False
+        # If this is the last chunk, assemble all parts in numerical order
+        if chunk_index == total_chunks - 1:
+            with open(final_save_path, "wb") as outfile:
+                for idx in range(total_chunks):
+                    p_path = os.path.join(job_upload_dir, f"clip_{clip_index:03d}.part_{idx:05d}")
+                    if os.path.exists(p_path):
+                        with open(p_path, "rb") as pf:
+                            shutil.copyfileobj(pf, outfile)
+                        try:
+                            os.remove(p_path)
+                        except Exception:
+                            pass
+
+            is_complete = True
+            with jobs_lock:
+                clips_list = JOBS[job_id]["clips"]
+                while len(clips_list) <= clip_index:
+                    clips_list.append(None)
+                clips_list[clip_index] = final_save_path
+                save_job_state(job_id)
+
+            logger.info(f"Job {job_id}: Successfully assembled clip #{clip_index} ({filename}) -> {os.path.getsize(final_save_path)} bytes")
+
+        return {
+            "status": "ok",
+            "clip_index": clip_index,
+            "chunk_index": chunk_index,
+            "is_complete": is_complete
+        }
+    except Exception as e:
+        logger.error(f"Error handling chunk {chunk_index}/{total_chunks} for clip #{clip_index} in job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed writing chunk: {str(e)}")
+    finally:
+        try:
+            await chunk.close()
+        except Exception:
+            pass
+
+# Step 2b (Fallback): Upload individual clip as a single file
 @app.post("/api/jobs/{job_id}/upload_clip")
 async def upload_clip(
     job_id: str,
