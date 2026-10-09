@@ -4,6 +4,7 @@ import time
 import shutil
 import logging
 import json
+import gc
 from typing import List, Optional
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -191,6 +192,12 @@ async def upload_clip(
     except Exception as e:
         logger.error(f"Error saving clip #{clip_index} for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed saving clip #{clip_index}: {str(e)}")
+    finally:
+        try:
+            await clip.close()
+        except Exception:
+            pass
+        gc.collect()
 
 def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, title_text: Optional[str], music_choice: Optional[str]):
     global LAST_PLAYED_MUSIC
@@ -253,11 +260,22 @@ def run_video_job(job_id: str, clip_paths: List[str], target_duration: float, ti
         save_job_state(job_id)
         logger.info(f"Job {job_id} completed successfully: {output_filename}")
 
+        # Clean up uploaded raw clips to preserve container disk and memory
+        try:
+            job_upload_dir = os.path.join(UPLOADS_DIR, job_id)
+            if os.path.exists(job_upload_dir):
+                shutil.rmtree(job_upload_dir, ignore_errors=True)
+                logger.info(f"Cleaned up uploaded source clips for job {job_id}")
+        except Exception as e:
+            logger.warning(f"Error cleaning up uploads for {job_id}: {e}")
+
     except Exception as e:
         logger.exception(f"Unhandled error in job {job_id}")
         JOBS[job_id]["status"] = "failed"
         JOBS[job_id]["error"] = str(e)
         save_job_state(job_id)
+    finally:
+        gc.collect()
 
 # Step 3: Trigger generation once clips are uploaded
 @app.post("/api/jobs/{job_id}/start")

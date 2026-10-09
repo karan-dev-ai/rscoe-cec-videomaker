@@ -17,6 +17,11 @@ const progressStep = document.getElementById('progressStep');
 const progressPercent = document.getElementById('progressPercent');
 const errorContainer = document.getElementById('errorContainer');
 const errorMessage = document.getElementById('errorMessage');
+const errorActionArea = document.getElementById('errorActionArea');
+const resumeUploadBtn = document.getElementById('resumeUploadBtn');
+const resumeUploadBtnText = document.getElementById('resumeUploadBtnText');
+let currentJobId = null;
+let resumeIndex = 0;
 const resultCard = document.getElementById('resultCard');
 const resultVideo = document.getElementById('resultVideo');
 const downloadBtn = document.getElementById('downloadBtn');
@@ -127,14 +132,24 @@ function renderFileList() {
   });
 }
 
-function showError(msg) {
+function showError(msg, onResume = null) {
   errorMessage.textContent = msg;
   errorContainer.classList.remove('hidden');
+  if (onResume && errorActionArea && resumeUploadBtn) {
+    errorActionArea.classList.remove('hidden');
+    resumeUploadBtn.onclick = () => {
+      hideError();
+      onResume();
+    };
+  } else if (errorActionArea) {
+    errorActionArea.classList.add('hidden');
+  }
   errorContainer.scrollIntoView({ behavior: 'smooth' });
 }
 
 function hideError() {
   errorContainer.classList.add('hidden');
+  if (errorActionArea) errorActionArea.classList.add('hidden');
   errorMessage.textContent = '';
 }
 
@@ -145,59 +160,97 @@ function updateProgress(percent, stepText) {
   progressStep.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> <span>${stepText}</span>`;
 }
 
-// Upload a single clip with real-time XHR progress
-function uploadClipAsync(jobId, file, index, totalFiles) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const formData = new FormData();
-    formData.append('clip_index', index);
-    formData.append('clip', file);
+// Upload a single clip with automatic 3x auto-retry on cellular network hiccup
+function uploadClipWithRetry(jobId, file, index, totalFiles, maxRetries = 3) {
+  let attempt = 0;
 
-    const baseProgress = (index / totalFiles) * 50;
-    const clipWeight = (1 / totalFiles) * 50;
+  function attemptUpload() {
+    attempt++;
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('clip_index', index);
+      formData.append('clip', file);
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const filePct = (e.loaded / e.total);
-        const overallPct = baseProgress + (filePct * clipWeight);
-        updateProgress(
-          overallPct,
-          `Uploading clip ${index + 1} of ${totalFiles} (${Math.round(filePct * 100)}%)...`
-        );
-      }
-    };
+      // Generous 180s timeout per clip for cellular mobile upload
+      xhr.timeout = 180000;
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          resolve(res);
-        } catch (e) {
-          resolve({});
+      const baseProgress = (index / totalFiles) * 50;
+      const clipWeight = (1 / totalFiles) * 50;
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const filePct = (e.loaded / e.total);
+          const overallPct = baseProgress + (filePct * clipWeight);
+          const mbUploaded = (e.loaded / (1024 * 1024)).toFixed(1);
+          const mbTotal = (e.total / (1024 * 1024)).toFixed(1);
+          updateProgress(
+            overallPct,
+            `Uploading clip ${index + 1} of ${totalFiles} (${Math.round(filePct * 100)}% • ${mbUploaded}/${mbTotal}MB)...`
+          );
         }
-      } else {
-        let errDetail = `Server error (${xhr.status})`;
-        try {
-          const res = JSON.parse(xhr.responseText);
-          if (res.detail) errDetail = res.detail;
-        } catch (e) {
-          if (xhr.status === 413) errDetail = 'File too large for upload limit. Try shorter clips.';
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const res = JSON.parse(xhr.responseText);
+            resolve(res);
+          } catch (e) {
+            resolve({});
+          }
+        } else {
+          let errDetail = `Server response ${xhr.status}`;
+          try {
+            const res = JSON.parse(xhr.responseText);
+            if (res.detail) errDetail = res.detail;
+          } catch (e) {}
+
+          if (xhr.status >= 500 && attempt < maxRetries) {
+            console.warn(`Server ${xhr.status} on clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+            updateProgress(baseProgress, `⚠️ Server busy on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+            setTimeout(() => {
+              attemptUpload().then(resolve).catch(reject);
+            }, 1500);
+          } else {
+            reject(new Error(`Failed uploading clip #${index + 1} (${file.name}): ${errDetail}`));
+          }
         }
-        reject(new Error(`Failed uploading clip #${index + 1} (${file.name}): ${errDetail}`));
-      }
-    };
+      };
 
-    xhr.onerror = () => {
-      reject(new Error(`Network error while uploading clip #${index + 1} (${file.name}). Check connection.`));
-    };
+      xhr.ontimeout = () => {
+        if (attempt < maxRetries) {
+          console.warn(`Timeout uploading clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          updateProgress(baseProgress, `⚠️ Network slow on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          setTimeout(() => {
+            attemptUpload().then(resolve).catch(reject);
+          }, 1500);
+        } else {
+          reject(new Error(`Cellular timeout uploading clip #${index + 1} (${file.name}). Tap below to resume.`));
+        }
+      };
 
-    xhr.open('POST', `/api/jobs/${jobId}/upload_clip`, true);
-    xhr.send(formData);
-  });
+      xhr.onerror = () => {
+        if (attempt < maxRetries) {
+          console.warn(`Network error on clip #${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          updateProgress(baseProgress, `⚠️ Cellular hiccup on clip ${index + 1}. Auto-retrying (${attempt}/${maxRetries})...`);
+          setTimeout(() => {
+            attemptUpload().then(resolve).catch(reject);
+          }, 1500);
+        } else {
+          reject(new Error(`Cellular connection dropped on clip #${index + 1} (${file.name}). Don't worry, your files are safe! Tap below to resume.`));
+        }
+      };
+
+      xhr.open('POST', `/api/jobs/${jobId}/upload_clip`, true);
+      xhr.send(formData);
+    });
+  }
+
+  return attemptUpload();
 }
 
-// Generate Video Handler
-generateBtn.addEventListener('click', async () => {
+async function startVideoPipeline(startClipIndex = 0) {
   if (selectedFiles.length < 2) {
     showError('Please select at least 2 video clips (recommended 6–7 clips).');
     return;
@@ -208,28 +261,30 @@ generateBtn.addEventListener('click', async () => {
   generateBtn.classList.add('opacity-50', 'cursor-not-allowed');
   progressContainer.classList.remove('hidden');
   resultCard.classList.add('hidden');
-  updateProgress(2, 'Initializing session...');
 
   // Automatically activate the 5 PYQs Brain Drill so user is engaged while waiting!
   loadQuizQuestions();
 
-  try {
-    // 1. Initialize session
-    const sessionRes = await fetch('/api/jobs/create', { method: 'POST' });
-    if (!sessionRes.ok) {
-      throw new Error('Could not initialize video session on server.');
-    }
-    const { job_id } = await sessionRes.json();
+  const total = selectedFiles.length;
 
-    // 2. Upload clips in parallel batches (concurrency=2) for fast mobile transmission (0% -> 50%)
-    const total = selectedFiles.length;
-    const concurrency = 2;
-    for (let i = 0; i < total; i += concurrency) {
-      const batch = [];
-      for (let j = i; j < Math.min(i + concurrency, total); j++) {
-        batch.push(uploadClipAsync(job_id, selectedFiles[j], j, total));
+  try {
+    // 1. Initialize session if starting fresh
+    if (!currentJobId || startClipIndex === 0) {
+      updateProgress(2, 'Initializing session...');
+      const sessionRes = await fetch('/api/jobs/create', { method: 'POST' });
+      if (!sessionRes.ok) {
+        throw new Error('Could not initialize video session on server.');
       }
-      await Promise.all(batch);
+      const data = await sessionRes.json();
+      currentJobId = data.job_id;
+    }
+
+    const job_id = currentJobId;
+
+    // 2. Upload clips strictly sequentially (concurrency=1) for stable mobile LTE transmission (0% -> 50%)
+    for (let i = startClipIndex; i < total; i++) {
+      resumeIndex = i;
+      await uploadClipWithRetry(job_id, selectedFiles[i], i, total);
     }
 
     updateProgress(50, 'All clips uploaded! Starting FFmpeg video engine...');
@@ -254,9 +309,23 @@ generateBtn.addEventListener('click', async () => {
     pollJobStatus(job_id);
 
   } catch (err) {
-    showError(err.message || 'An unexpected error occurred.');
+    console.error(err);
+    const failedIdx = resumeIndex;
+    const canResume = currentJobId && failedIdx < total;
+    if (canResume && resumeUploadBtnText) {
+      resumeUploadBtnText.textContent = `🔄 Tap to Resume Uploading Clip #${failedIdx + 1}`;
+    }
+    showError(
+      err.message || 'An unexpected error occurred.',
+      canResume ? () => startVideoPipeline(failedIdx) : null
+    );
     resetGenerateButton();
   }
+}
+
+// Generate Video Handler
+generateBtn.addEventListener('click', () => {
+  startVideoPipeline(0);
 });
 
 function pollJobStatus(jobId) {

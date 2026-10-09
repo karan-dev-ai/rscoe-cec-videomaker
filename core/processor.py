@@ -249,9 +249,8 @@ def process_video_reel(
         if title_text and title_text.strip():
             has_title = generate_title_card_image(title_text.strip(), title_png, width=output_width, height=output_height)
 
-        # 3. Build single-pass inputs & filters
-        inputs = []
-        filter_parts = []
+        # 3. Single-Stream Normalization (1 clip at a time to keep RAM strictly under 150MB)
+        normalized_clips = []
         clip_durations = []
 
         for i, clip_p in enumerate(clip_paths):
@@ -261,21 +260,51 @@ def process_video_reel(
             offset = 0.5 if raw_d > actual_d + 1.0 else 0.0
             clip_durations.append(actual_d)
 
-            inputs.extend(["-ss", f"{offset:.2f}", "-t", f"{actual_d:.2f}", "-i", abs_clip])
-            filter_parts.append(
-                f"[{i}:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase:flags=fast_bilinear,"
-                f"crop={output_width}:{output_height},setsar=1,fps=25[v{i}]"
-            )
+            norm_seg = os.path.join(temp_dir, f"norm_clip_{i:03d}.mp4")
+            cmd_norm = [
+                ffmpeg_bin, "-y",
+                "-ss", f"{offset:.2f}",
+                "-t", f"{actual_d:.2f}",
+                "-i", abs_clip,
+                "-vf", f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop={output_width}:{output_height},setsar=1,fps=25",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "fastdecode",
+                "-crf", "24",
+                "-pix_fmt", "yuv420p",
+                "-metadata:s:v:0", "rotate=0",
+                "-an",
+                norm_seg
+            ]
 
-        # 4. Smooth transitions (xfade)
+            logger.info(f"Normalizing clip {i+1}/{num_clips} (dur: {actual_d:.1f}s)...")
+            norm_pct = int(55 + (i / num_clips) * 15)
+            update_progress(norm_pct, f"Optimizing clip {i+1} of {num_clips} (720x1280)...")
+
+            res_norm = subprocess.run(cmd_norm, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            if res_norm.returncode != 0 or not os.path.exists(norm_seg):
+                err_detail = res_norm.stderr[-300:] if res_norm.stderr else "FFmpeg error"
+                logger.error(f"Failed normalizing clip {i}: {err_detail}")
+                return False, f"Failed optimizing clip #{i+1}: {err_detail}"
+
+            normalized_clips.append(norm_seg)
+
+        # 4. Multi-Clip Composition (using pre-normalized lightweight 720x1280 clips)
+        inputs = []
+        filter_parts = []
+
+        for norm_p in normalized_clips:
+            inputs.extend(["-i", norm_p])
+
+        # Smooth transitions (xfade)
         chosen_trans = random.choice(TRANSITIONS)
         logger.info(f"Applying transition: {chosen_trans}")
 
         if num_clips == 1:
-            curr_v = "[v0]"
+            curr_v = "[0:v]"
             total_dur = clip_durations[0]
         else:
-            curr_v = "[v0]"
+            curr_v = "[0:v]"
             curr_len = clip_durations[0]
             for i in range(1, num_clips):
                 c_dur = clip_durations[i]
@@ -283,7 +312,7 @@ def process_video_reel(
                 off = max(0.2, curr_len - t_dur)
                 next_tag = f"[xf{i}]"
                 filter_parts.append(
-                    f"{curr_v}[v{i}]xfade=transition={chosen_trans}:duration={t_dur:.2f}:offset={off:.2f}{next_tag}"
+                    f"{curr_v}[{i}:v]xfade=transition={chosen_trans}:duration={t_dur:.2f}:offset={off:.2f}{next_tag}"
                 )
                 curr_v = next_tag
                 curr_len = off + c_dur
@@ -320,7 +349,7 @@ def process_video_reel(
             )
             has_audio = True
 
-        # 8. Build primary single-pass command
+        # 8. Build primary composition command
         cmd_primary = [
             ffmpeg_bin, "-y",
             "-threads", "0",
@@ -348,52 +377,52 @@ def process_video_reel(
             os.path.abspath(output_path)
         ])
 
-        update_progress(60, "Rendering vertical reel at high speed...")
-        logger.info(f"Executing Lightning Single-Pass FFmpeg ({total_dur:.1f}s)...")
+        update_progress(70, "Rendering vertical reel at high speed...")
+        logger.info(f"Executing Multi-Clip Composition ({total_dur:.1f}s)...")
 
-        proc = subprocess.Popen(cmd_primary, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_us="):
-                try:
-                    us = int(line.split("=")[1])
-                    sec = us / 1000000.0
-                    pct = min(99, int(60 + (sec / total_dur) * 39))
-                    update_progress(pct, f"Rendering reel ({sec:.1f}s / {total_dur:.1f}s)...")
-                except Exception:
-                    pass
+        err_log_path = os.path.join(temp_dir, "ffmpeg_primary_err.log")
+        with open(err_log_path, "w", encoding="utf-8", errors="replace") as err_file:
+            proc = subprocess.Popen(cmd_primary, stdout=subprocess.PIPE, stderr=err_file, text=True, bufsize=1)
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        us = int(line.split("=")[1])
+                        sec = us / 1000000.0
+                        pct = min(99, int(70 + (sec / total_dur) * 29))
+                        update_progress(pct, f"Rendering reel ({sec:.1f}s / {total_dur:.1f}s)...")
+                    except Exception:
+                        pass
 
-        proc.wait()
-        _, err_msg = proc.communicate()
+            proc.wait()
+
+        err_msg = ""
+        if os.path.exists(err_log_path):
+            try:
+                with open(err_log_path, "r", encoding="utf-8", errors="replace") as ef:
+                    err_msg = ef.read()
+            except Exception:
+                pass
 
         if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             update_progress(100, "Done!")
-            logger.info("Lightning Single-Pass composition completed successfully!")
+            logger.info("Multi-Clip composition completed successfully!")
             return True, "Video generated successfully!"
 
-        # Fallback 1: Single-pass with concat filter
-        logger.warning(f"Primary xfade failed (code {proc.returncode}). Trying single-pass concat fallback...")
-        update_progress(75, "Finalizing with high-compatibility stream engine...")
+        # Fallback 1: Concat on pre-normalized clips
+        logger.warning(f"Primary xfade failed (code {proc.returncode}). Trying concat fallback...")
+        update_progress(85, "Finalizing with high-compatibility stream engine...")
 
-        filter_parts_fb = []
-        for i in range(num_clips):
-            filter_parts_fb.append(
-                f"[{i}:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase:flags=fast_bilinear,"
-                f"crop={output_width}:{output_height},setsar=1,fps=25[cv{i}]"
-            )
-        concat_tags = "".join([f"[cv{k}]" for k in range(num_clips)])
-        filter_parts_fb.append(f"{concat_tags}concat=n={num_clips}:v=1:a=0[v_cat]")
+        concat_tags = "".join([f"[{k}:v]" for k in range(num_clips)])
+        filter_parts_fb = [f"{concat_tags}concat=n={num_clips}:v=1:a=0[v_cat]"]
         curr_fb_v = "[v_cat]"
         total_fb_dur = sum(clip_durations)
 
-        fb_idx = num_clips
         fb_inputs = []
-        for i, clip_p in enumerate(clip_paths):
-            abs_clip = os.path.abspath(clip_p)
-            c_dur = clip_durations[i]
-            offset = 0.5 if get_media_duration(abs_clip) > c_dur + 1.0 else 0.0
-            fb_inputs.extend(["-ss", f"{offset:.2f}", "-t", f"{c_dur:.2f}", "-i", abs_clip])
+        for norm_p in normalized_clips:
+            fb_inputs.extend(["-i", norm_p])
 
+        fb_idx = num_clips
         if scaled_logo and os.path.exists(scaled_logo):
             fb_inputs.extend(["-i", os.path.abspath(scaled_logo)])
             filter_parts_fb.append(f"{curr_fb_v}[{fb_idx}:v]overlay=W-w-24:24[v_logo_fb]")
@@ -435,7 +464,7 @@ def process_video_reel(
         res_fb = subprocess.run(cmd_fb, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if res_fb.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             update_progress(100, "Done!")
-            logger.info("Single-pass concat fallback completed successfully!")
+            logger.info("Concat fallback completed successfully!")
             return True, "Video generated successfully!"
 
         err_snip = res_fb.stderr[-500:].strip() if res_fb.stderr else (err_msg[-500:].strip() if err_msg else "Unknown error")
